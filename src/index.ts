@@ -1,118 +1,92 @@
 export type QueryKeyPart = string | number | boolean | object | undefined;
-export type QueryKey = readonly QueryKeyPart[];
 
-function createQueryKey<const T extends readonly QueryKeyPart[]>(
-  ...parts: T
-): T {
-  return parts;
+export function key<
+  const Args extends any[],
+  const Return extends readonly QueryKeyPart[],
+>(fn: (...args: Args) => Return) {
+  const wrapper = (...args: Args) => {
+    if (args.length === 0) {
+      return () => fn(...([] as any));
+    }
+    return fn(...args);
+  };
+  return wrapper as (...args: Args) => Return & (() => Return);
 }
 
-export function defineKey<
-  const Parts extends readonly QueryKeyPart[],
-  Args extends unknown[] = []
->(fn: (...args: Args) => Parts): (...args: Args) => Parts {
-  return ((...args: Args) => {
-    const parts = fn(...args);
-    return createQueryKey(...parts);
-  }) as any;
-}
-
-export type QueryKeyBuilder<
-  Args extends unknown[] = [],
-  Return extends readonly QueryKeyPart[] = readonly QueryKeyPart[]
-> = (...args: Args) => Return;
-
-export type QueryKeyRegistry = Record<string, QueryKeyBuilder<any, any>>;
-
-type ValidFunction<T> = T extends (...args: infer A) => infer R
-  ? R extends readonly QueryKeyPart[]
-    ? T
-    : never
-  : never;
+type KeyFunction = ReturnType<typeof key>;
 
 type ValidateKeyMap<T> = {
-  [K in keyof T]: T[K] extends (...args: any[]) => any
-    ? ValidFunction<T[K]>
-    : T[K] extends object
-    ? ValidateKeyMap<T[K]>
-    : never;
+  [K in keyof T]: T[K] extends KeyFunction
+    ? T[K]
+    : T[K] extends (...args: any[]) => any
+      ? `ERROR: "${K & string}" must be wrapped with key() function. Example: ${K & string}: key((arg) => ["value"])`
+      : T[K] extends object
+        ? ValidateKeyMap<T[K]>
+        : `ERROR: "${K & string}" must be either a key() function or a nested object`;
 };
 
-export class QueryKeyManager {
-  private static registry: QueryKeyRegistry = {};
-  private static keyNames: Set<string> = new Set();
+type ProcessKeyMap<T> = {
+  [K in keyof T]: T[K] extends (...args: infer A) => infer R
+    ? (...args: A) => R & (() => R)
+    : T[K] extends object
+      ? ProcessKeyMap<T[K]>
+      : never;
+};
 
-  static create<
-    const KeyMap extends Record<string, QueryKeyBuilder<any, any> | object>
-  >(name: string, keyMap: KeyMap & ValidateKeyMap<KeyMap>): KeyMap {
-    if (this.keyNames.has(name)) {
-      if (process.env.NODE_ENV !== "production") {
-        throw new Error(`QueryKeyManager: Key name "${name}" already exists`);
-      }
-      return keyMap;
+const registry: Record<string, (...args: any[]) => any> = {};
+const keyNames = new Set<string>();
+
+function processNode<T extends Record<string, any>>(node: T): ProcessKeyMap<T> {
+  const processed = {} as any;
+
+  for (const key in node) {
+    const value = node[key];
+    if (typeof value === "function") {
+      processed[key] = value;
+    } else if (value && typeof value === "object") {
+      processed[key] = processNode(value);
     }
-
-    this.keyNames.add(name);
-
-    const register = (prefix: string, node: Record<string, any>) => {
-      for (const [key, value] of Object.entries(node)) {
-        const fullKey = `${prefix}.${key}`;
-        if (typeof value === "function") {
-          this.registry[fullKey] = value as QueryKeyBuilder<any, any>;
-        } else if (value && typeof value === "object") {
-          register(fullKey, value);
-        }
-      }
-    };
-
-    register(name, keyMap);
-
-    return keyMap;
   }
 
-  static getQueryKeys(): Readonly<QueryKeyRegistry> {
-    return Object.freeze({ ...this.registry });
-  }
-
-  static clearRegistry(): void {
-    this.registry = {};
-    this.keyNames.clear();
-  }
-
-  static registerLegacy(
-    legacyKey: string,
-    builder: QueryKeyBuilder<any, any>
-  ): void {
-    if (this.registry[legacyKey]) {
-      throw new Error(`Legacy key ${legacyKey} conflicts with existing keys`);
-    }
-    this.registry[legacyKey] = builder;
-  }
-
-  private constructor() {}
+  return processed;
 }
 
-export function migrateLegacyKeys<T extends QueryKeyBuilder<any, any>>(
-  legacyKeyOrKeys: string | string[],
-  newBuilder: T
-): T {
-  if (process.env.NODE_ENV !== "production") {
-    const list = Array.isArray(legacyKeyOrKeys)
-      ? legacyKeyOrKeys.join(", ")
-      : legacyKeyOrKeys;
-    console.warn(`Migrating legacy key(s): ${list}`);
-  }
-
-  const keys = Array.isArray(legacyKeyOrKeys)
-    ? legacyKeyOrKeys
-    : [legacyKeyOrKeys];
-
-  for (const key of keys) {
-    if (QueryKeyManager.getQueryKeys()[key]) {
-      throw new Error(`Legacy key ${key} conflicts with new keys`);
+function registerKeys(prefix: string, node: Record<string, any>): void {
+  for (const [key, value] of Object.entries(node)) {
+    const fullKey = `${prefix}.${key}`;
+    if (typeof value === "function") {
+      registry[fullKey] = value;
+    } else if (value && typeof value === "object") {
+      registerKeys(fullKey, value);
     }
-    QueryKeyManager.registerLegacy(key, newBuilder);
+  }
+}
+
+export function defineQueryKeys<
+  const Name extends string,
+  const KeyMap extends Record<string, KeyFunction | object>,
+>(name: Name, keyMap: KeyMap & ValidateKeyMap<KeyMap>): ProcessKeyMap<KeyMap> {
+  if (keyNames.has(name)) {
+    if (process.env.NODE_ENV !== "production") {
+      const error = `Query key name "${name}" has already been registered.
+
+This typically happens when:
+1. You're calling defineQueryKeys() with the same name twice
+2. Hot module reloading is re-executing the registration
+
+To fix this:
+- Use unique names for each defineQueryKeys() call
+- In development, the duplicate registration will be ignored
+- In production, ensure each key name is only registered once`;
+
+      throw new Error(error);
+    }
+    return processNode(keyMap);
   }
 
-  return newBuilder;
+  keyNames.add(name);
+  const processed = processNode(keyMap);
+  registerKeys(name, processed);
+
+  return processed;
 }
