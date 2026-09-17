@@ -1,4 +1,4 @@
-![Banner](/public/banner.png)
+<img src="./public/logo.png" alt="Demo" width="100" height="100">
 
 # React Query Key Manager
 
@@ -26,6 +26,7 @@ React Query Key Manager solves these problems with a simple, type-safe API that 
 ## Quick Start
 
 ```tsx
+import { useQuery } from "@tanstack/react-query";
 import { defineQueryKeys, key } from "react-query-key-manager";
 
 // Define your query keys
@@ -41,8 +42,6 @@ export const userKeys = defineQueryKeys("user", {
 });
 
 // Use them with React Query
-import { useQuery } from "@tanstack/react-query";
-
 function UserProfile({ userId }: { userId: string }) {
   const { data } = useQuery({
     queryKey: userKeys.profile(userId),
